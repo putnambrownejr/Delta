@@ -2,6 +2,7 @@ const STORAGE_KEY = "git-learning-lab-state-v5";
 const THEME_KEY = "git-learning-lab-theme";
 const PS_ROOT = "C:\\Training";
 const PS_PROMPT = "PS C:\\Training\\OracleGitLab>";
+const CODEX_DEFAULT_CWD = "C:\\Users\\Analyst";
 const QUIZ_VISIBLE_COUNT = 3;
 const QUIZ_EXIT_DELAY_MS = 360;
 const QUIZ_OPTION_ORDER_VERSION = 2;
@@ -1686,7 +1687,8 @@ function createTrainingState(moduleId = "git-basics") {
     editCounter: 1,
     lessonIndex: 0,
     expandedLessonIndex: null,
-    repoExplorerOpen: false,
+    repoExplorerOpen: true,
+    repoExplorerTouched: false,
     explorerCollapsedFolders: [],
     explorerExpandedFolders: [],
     explorerExpandedFiles: [],
@@ -1713,8 +1715,28 @@ function createCodexState() {
     activeModuleId: codexLab.id,
     guidedStep: 0,
     codexSection: 0,
+    cwd: CODEX_DEFAULT_CWD,
+    codexCli: createCodexCliState(),
     quizSession: createQuizSession(codexLab.id),
-    terminal: []
+    terminal: [
+      {
+        type: "note",
+        text: "Codex CLI simulator ready. Try: node --version; npm --version"
+      },
+      {
+        type: "note",
+        text: `Practice path: ${codexLab.cliCommand} -> codex login -> cd ${ORACLE_REPO_ROOT} -> codex`
+      }
+    ]
+  };
+}
+
+function createCodexCliState() {
+  return {
+    installed: false,
+    loggedIn: false,
+    sessionOpen: false,
+    promptRuns: []
   };
 }
 
@@ -1816,6 +1838,7 @@ function createAdvancedState() {
     lessonIndex: 0,
     expandedLessonIndex: null,
     repoExplorerOpen: true,
+    repoExplorerTouched: false,
     explorerCollapsedFolders: [],
     explorerExpandedFolders: [],
     explorerExpandedFiles: [],
@@ -2069,6 +2092,7 @@ function rewindToGuidedCommand(commandIndex) {
     activeModuleId: state.activeModuleId,
     quizSession: state.quizSession,
     repoExplorerOpen: state.repoExplorerOpen,
+    repoExplorerTouched: state.repoExplorerTouched,
     explorerCollapsedFolders: state.explorerCollapsedFolders,
     explorerExpandedFolders: state.explorerExpandedFolders,
     explorerExpandedFiles: state.explorerExpandedFiles,
@@ -2079,6 +2103,7 @@ function rewindToGuidedCommand(commandIndex) {
     ...createTrainingState(),
     activeModuleId: previousUiState.activeModuleId || "git-basics",
     repoExplorerOpen: Boolean(previousUiState.repoExplorerOpen),
+    repoExplorerTouched: Boolean(previousUiState.repoExplorerTouched),
     explorerCollapsedFolders: Array.isArray(previousUiState.explorerCollapsedFolders)
       ? [...previousUiState.explorerCollapsedFolders]
       : [],
@@ -2486,6 +2511,7 @@ function handleAction(button) {
 
   if (action === "toggle-repo-explorer") {
     state.repoExplorerOpen = !state.repoExplorerOpen;
+    state.repoExplorerTouched = true;
     saveState();
     render();
     return;
@@ -2559,6 +2585,13 @@ function handleAction(button) {
     return;
   }
 
+  if (action === "show-quiz-hint") {
+    showQuizHint(button.dataset.quizId);
+    saveState();
+    render();
+    return;
+  }
+
   updateCommandPlaceholder();
 }
 
@@ -2572,6 +2605,11 @@ function runCommand(rawCommand) {
     state.terminal = [];
     saveState();
     render();
+    return;
+  }
+
+  if (isCodexMode()) {
+    runCodexCommand(command);
     return;
   }
 
@@ -2611,6 +2649,325 @@ function runCommand(rawCommand) {
   maybeAdvanceLesson();
   saveState();
   render();
+}
+
+function runCodexCommand(command) {
+  ensureCodexCliState();
+  appendTerminal("prompt", `${getCodexPrompt()} ${command}`);
+
+  splitCodexCommandLine(command).forEach((part) => {
+    const result = executeCodexCommand(part);
+    appendTerminal(result.type, result.text);
+  });
+
+  saveState();
+  render();
+}
+
+function splitCodexCommandLine(command) {
+  const text = String(command || "").trim();
+  if (!text || /^codex\s+(exec\s+)?["']?/i.test(text)) {
+    return [text].filter(Boolean);
+  }
+  return text
+    .split(";")
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function executeCodexCommand(command) {
+  ensureCodexCliState();
+  const text = String(command || "").trim();
+  const normalized = normalizeCommand(text);
+  const tokens = tokenize(text);
+  const lower = tokens.map((token) => token.toLowerCase());
+
+  if (!text) {
+    return { type: "note", text: "Type a setup command or Codex prompt." };
+  }
+
+  if (normalized === "help" || normalized === "codex help") {
+    return {
+      type: "note",
+      text:
+        [
+          "Codex simulator commands:",
+          "  node --version",
+          "  npm --version",
+          `  ${codexLab.cliCommand}`,
+          "  codex login",
+          `  cd ${ORACLE_REPO_ROOT}`,
+          "  Get-Location",
+          "  Get-ChildItem -Force",
+          "  rg --files",
+          "  rg --files -g \"*.sql\"",
+          "  git status",
+          "  codex",
+          "  codex exec \"Review this repo for docs gaps\"",
+          "  exit"
+        ].join("\n")
+    };
+  }
+
+  if (normalized === "node --version") {
+    return { type: "success", text: "v20.11.1" };
+  }
+
+  if (normalized === "npm --version") {
+    return { type: "success", text: "10.2.4" };
+  }
+
+  if (normalized === normalizeCommand(codexLab.cliCommand)) {
+    state.codexCli.installed = true;
+    return { type: "success", text: "Installed @openai/codex globally. Next: codex login" };
+  }
+
+  if (normalized === "codex --upgrade" || normalized === "codex upgrade") {
+    if (!state.codexCli.installed) {
+      return { type: "error", text: "Codex is not installed yet. Run the install command first." };
+    }
+    return { type: "success", text: "Codex CLI is up to date in this simulator." };
+  }
+
+  if (normalized === "codex login") {
+    if (!state.codexCli.installed) {
+      return { type: "error", text: "Install Codex first: npm install -g @openai/codex" };
+    }
+    state.codexCli.loggedIn = true;
+    return { type: "success", text: "Browser sign-in completed. Codex is authenticated for this simulator." };
+  }
+
+  if (lower[0] === "cd" || lower[0] === "set-location") {
+    return commandCodexCd(tokens.slice(1));
+  }
+
+  if (normalized === "get-location" || normalized === "pwd") {
+    return { type: "success", text: state.cwd || CODEX_DEFAULT_CWD };
+  }
+
+  if (["get-childitem -force", "dir", "ls"].includes(normalized)) {
+    return { type: "success", text: renderCodexDirectoryListing() };
+  }
+
+  if (lower[0] === "rg" && lower[1] === "--files") {
+    const sqlOnly = tokens.includes("-g") && tokens.some((token) => token.replaceAll("'", "").replaceAll('"', "") === "*.sql");
+    return { type: "success", text: renderCodexFileSearch(sqlOnly) };
+  }
+
+  if (normalized === "git status") {
+    if (!isCodexRepoRoot()) {
+      return { type: "error", text: "fatal: not a git repository. Navigate to C:\\Repositories\\Oracle first." };
+    }
+    return {
+      type: "success",
+      text:
+        [
+          "On branch feature/codex-training-demo",
+          "Your branch is up to date with origin/feature/codex-training-demo.",
+          "nothing to commit, working tree clean"
+        ].join("\n")
+    };
+  }
+
+  if (normalized === "git branch") {
+    return { type: "success", text: "  main\n* feature/codex-training-demo" };
+  }
+
+  if (normalized === "exit") {
+    if (!state.codexCli.sessionOpen) {
+      return { type: "note", text: "No Codex session is open." };
+    }
+    state.codexCli.sessionOpen = false;
+    return { type: "success", text: "Closed Codex session. Back to PowerShell." };
+  }
+
+  if (lower[0] === "codex") {
+    return commandCodex(tokens.slice(1), text);
+  }
+
+  if (state.codexCli.sessionOpen) {
+    return runCodexPrompt(text, "interactive");
+  }
+
+  if (looksLikeCodexPrompt(text)) {
+    return {
+      type: "note",
+      text: "This looks like a prompt. Start Codex first with codex, or run it as: codex \"your prompt\"."
+    };
+  }
+
+  return { type: "error", text: "Command not recognized in the Codex simulator. Type help for supported commands." };
+}
+
+function commandCodexCd(args) {
+  const target = args.join(" ").trim();
+  if (!target) {
+    return { type: "error", text: "Specify a folder, for example: cd C:\\Repositories\\Oracle" };
+  }
+
+  const normalizedTarget = target.replaceAll("/", "\\").replace(/^["']|["']$/g, "");
+  const current = state.cwd || CODEX_DEFAULT_CWD;
+  if (normalizedTarget === "..") {
+    state.cwd = current.split("\\").slice(0, -1).join("\\") || "C:\\";
+    return { type: "success", text: `Location changed to ${state.cwd}` };
+  }
+
+  if (normalizePathForCompare(normalizedTarget) === normalizePathForCompare(ORACLE_REPO_ROOT)) {
+    state.cwd = ORACLE_REPO_ROOT;
+    return { type: "success", text: `Location changed to ${ORACLE_REPO_ROOT}` };
+  }
+
+  if (normalizePathForCompare(normalizedTarget) === normalizePathForCompare("C:\\Repositories")) {
+    state.cwd = "C:\\Repositories";
+    return { type: "success", text: "Location changed to C:\\Repositories" };
+  }
+
+  if (normalizedTarget.toLowerCase() === "oracle" && normalizePathForCompare(current) === normalizePathForCompare("C:\\Repositories")) {
+    state.cwd = ORACLE_REPO_ROOT;
+    return { type: "success", text: `Location changed to ${ORACLE_REPO_ROOT}` };
+  }
+
+  return { type: "error", text: `Cannot find path '${target}' in this simulator. Try cd ${ORACLE_REPO_ROOT}` };
+}
+
+function commandCodex(args, rawText) {
+  if (!state.codexCli.installed) {
+    return { type: "error", text: "Codex is not installed yet. Run: npm install -g @openai/codex" };
+  }
+  if (!state.codexCli.loggedIn) {
+    return { type: "error", text: "Codex is not authenticated yet. Run: codex login" };
+  }
+  if (!isCodexRepoRoot()) {
+    return { type: "error", text: `Navigate to the repo root first: cd ${ORACLE_REPO_ROOT}` };
+  }
+
+  if (!args.length) {
+    state.codexCli.sessionOpen = true;
+    return {
+      type: "success",
+      text: "Codex session started in the Oracle repo. Paste a prompt, or type exit to close the session."
+    };
+  }
+
+  const mode = args[0]?.toLowerCase() === "exec" ? "exec" : "one-shot";
+  const prompt = args[0]?.toLowerCase() === "exec" ? args.slice(1).join(" ") : args.join(" ");
+  if (!prompt.trim()) {
+    return { type: "error", text: `Provide a prompt, for example: codex ${mode === "exec" ? "exec " : ""}"Inspect this repo"` };
+  }
+
+  return runCodexPrompt(prompt, mode, rawText);
+}
+
+function runCodexPrompt(prompt, mode = "interactive") {
+  const response = simulateCodexPromptResponse(prompt, mode);
+  state.codexCli.promptRuns.push({
+    prompt,
+    mode,
+    cwd: state.cwd || CODEX_DEFAULT_CWD
+  });
+  return { type: "success", text: response };
+}
+
+function simulateCodexPromptResponse(prompt, mode) {
+  const normalized = String(prompt).toLowerCase();
+  const prefix = mode === "exec" ? "codex exec simulation" : "Codex simulation";
+  if (normalized.includes("ado") || normalized.includes("ticket")) {
+    return [
+      `${prefix}: ADO orientation draft`,
+      "1. Restate the request in plain language.",
+      "2. Infer requirements separately from assumptions.",
+      "3. Search likely Oracle repo areas before editing.",
+      "4. Propose a branch name and PR validation notes."
+    ].join("\n");
+  }
+  if (normalized.includes("sql") || normalized.includes("lineage")) {
+    return [
+      `${prefix}: SQL review plan`,
+      "- Identify source tables, joins, filters, and output grain.",
+      "- Compare nearby SQL files before changing behavior.",
+      "- Capture assumptions and validation gaps before commit."
+    ].join("\n");
+  }
+  if (normalized.includes("diff") || normalized.includes("review") || normalized.includes("risk")) {
+    return [
+      `${prefix}: review checkpoint`,
+      "- Review changed files before commit.",
+      "- Flag unsupported claims, missing validation, and behavior risks.",
+      "- Keep the final PR summary tied to file evidence."
+    ].join("\n");
+  }
+  if (normalized.includes("inspect") || normalized.includes("plan")) {
+    return [
+      `${prefix}: repo orientation plan`,
+      "- Confirm current folder and Git branch.",
+      "- Map files with rg --files.",
+      "- Identify likely entry points and validation commands.",
+      "- Ask before broad edits or uncertain assumptions."
+    ].join("\n");
+  }
+  return [
+    `${prefix}: prompt accepted`,
+    "I would inspect local context, produce a short plan, keep edits narrow, and report validation plus residual risks."
+  ].join("\n");
+}
+
+function looksLikeCodexPrompt(text) {
+  return /\b(inspect|review|summarize|refactor|draft|identify|explain|analyze|prompt|ticket)\b/i.test(text);
+}
+
+function renderCodexDirectoryListing() {
+  if (isCodexRepoRoot()) {
+    return [".azuredevops", "ccs", "docs", "fusion", "projects", "tests", "wacs", "AGENTS.md", "README.md"].join("\n");
+  }
+  if (normalizePathForCompare(state.cwd || "") === normalizePathForCompare("C:\\Repositories")) {
+    return "Oracle";
+  }
+  return "No repo files here yet. Use: cd C:\\Repositories\\Oracle";
+}
+
+function renderCodexFileSearch(sqlOnly = false) {
+  if (!isCodexRepoRoot()) {
+    return "No files found because the current folder is not the Oracle repo root.";
+  }
+
+  const files = flattenRepoMapFiles(oracleRepoMap);
+  const filtered = sqlOnly ? files.filter((file) => file.toLowerCase().endsWith(".sql")) : files;
+  return filtered.slice(0, 18).join("\n");
+}
+
+function flattenRepoMapFiles(items, parentPath = "") {
+  return items.flatMap((item) => {
+    const itemPath = item.path || [parentPath, item.name].filter(Boolean).join("/");
+    if (item.type === "file") {
+      return [itemPath];
+    }
+    return flattenRepoMapFiles(item.children || [], itemPath);
+  });
+}
+
+function ensureCodexCliState() {
+  state.codexCli = {
+    ...createCodexCliState(),
+    ...(state.codexCli && typeof state.codexCli === "object" ? state.codexCli : {})
+  };
+  state.codexCli.promptRuns = Array.isArray(state.codexCli.promptRuns) ? state.codexCli.promptRuns : [];
+  if (!state.cwd) {
+    state.cwd = CODEX_DEFAULT_CWD;
+  }
+  return state.codexCli;
+}
+
+function getCodexPrompt() {
+  ensureCodexCliState();
+  return state.codexCli.sessionOpen ? "codex>" : `PS ${state.cwd || CODEX_DEFAULT_CWD}>`;
+}
+
+function isCodexRepoRoot() {
+  return normalizePathForCompare(state.cwd || "") === normalizePathForCompare(ORACLE_REPO_ROOT);
+}
+
+function normalizePathForCompare(path) {
+  return String(path || "").replaceAll("/", "\\").replace(/\\+$/g, "").toLowerCase();
 }
 
 function executeCommand(command) {
@@ -3416,6 +3773,7 @@ function render() {
   labView.classList.toggle("codex-workspace", codexMode);
   labView.classList.toggle("capstone-workspace", capstoneMode);
   labView.classList.toggle("vscode-workspace", vscodeMode);
+  labView.classList.toggle("git-workspace", !practiceMode && !codexMode && !capstoneMode && !vscodeMode);
   updateTopbarContextActions(practiceMode);
 
   if (!state.inLesson) {
@@ -3446,7 +3804,6 @@ function render() {
 
   renderStatusStrip();
   renderLessons();
-  renderZones();
   renderGuidedCommands();
   renderTerminal();
   renderQuiz();
@@ -3846,7 +4203,7 @@ function renderRepositoryDirectory() {
     return;
   }
 
-  const open = Boolean(state.repoExplorerOpen);
+  const open = state.repoExplorerTouched ? Boolean(state.repoExplorerOpen) : true;
   panel.innerHTML = `
     <button class="repo-explorer-toggle" type="button" data-action="toggle-repo-explorer" aria-expanded="${open}"${titleAttribute("Show or hide the Oracle repository explorer")}>
       <span aria-hidden="true">${open ? "v" : ">"}</span>
@@ -3859,6 +4216,7 @@ function renderRepositoryDirectory() {
         <span>EXPLORER</span>
         <strong aria-hidden="true">...</strong>
       </div>
+      ${renderLabCreatedFilesSection()}
       <div class="repo-explorer-section">
         <div class="repo-explorer-section-title">
           <span aria-hidden="true">v</span>
@@ -3871,6 +4229,43 @@ function renderRepositoryDirectory() {
         <span>Simulator workspace</span>
         <code>${escapeHtml(state.cwd || `${PS_ROOT}\\${getModuleFolderDisplay()}`)}</code>
       </div>
+    </div>
+  `;
+}
+
+function renderLabCreatedFilesSection() {
+  const paths = getActiveRepoPaths();
+  if (!paths.length) {
+    return "";
+  }
+
+  const createdCount = paths.filter((path) => labPathStatus(path).label !== "planned").length;
+  return `
+    <div class="repo-explorer-section lab-created-section">
+      <div class="repo-explorer-section-title">
+        <span aria-hidden="true">v</span>
+        <strong>FILES CREATED IN THIS LAB</strong>
+        <small>${createdCount}/${paths.length}</small>
+      </div>
+      ${paths.map((path) => renderLabCreatedFileRow(path)).join("")}
+    </div>
+  `;
+}
+
+function renderLabCreatedFileRow(path) {
+  const status = labPathStatus(path);
+  const fileName = path.split(/[\\/]/).filter(Boolean).pop() || path;
+  const fullPath = `${ORACLE_REPO_ROOT}\\${path.replaceAll("/", "\\")}`;
+  const rowTitle = `${fullPath}\n${status.label}\nThis file appears here as the learner creates, stages, and commits it.`;
+  return `
+    <div class="repo-map-row repo-explorer-item file ${escapeAttribute(status.tone)} selected lab-target lab-created-file" style="--depth: 0"${titleAttribute(rowTitle)}>
+      <span class="repo-explorer-chevron" aria-hidden="true"></span>
+      <span class="repo-map-kind file">${escapeHtml(fileKind(fileName))}</span>
+      <div>
+        <strong>${escapeHtml(fileName)}</strong>
+        <code>${escapeHtml(path)}</code>
+      </div>
+      <span class="repo-map-status">${escapeHtml(status.label)}</span>
     </div>
   `;
 }
@@ -4077,18 +4472,7 @@ function renderCodexWorkspace() {
   document.getElementById("processMap").innerHTML = renderCodexLessonContent(sectionIndex);
   document.getElementById("guidedCommands").innerHTML = "";
 
-  const form = document.getElementById("commandForm");
-  if (form) {
-    form.hidden = true;
-  }
-  document.querySelector(".terminal-panel .section-kicker").textContent = "Codex setup";
-  document.querySelector(".terminal-panel h2").textContent = "Download or open Codex";
-  document.querySelector(".terminal-note").innerHTML = `<a href="${escapeAttribute(codexLab.setupUrl)}" target="_blank" rel="noreferrer">Official setup page</a>`;
-  document.getElementById("terminalHistory").innerHTML = `
-    <div class="terminal-line note">Official setup: ${escapeHtml(codexLab.setupUrl)}</div>
-    <div class="terminal-line prompt">CLI install: ${escapeHtml(codexLab.cliCommand)}</div>
-    <div class="terminal-line success">Use Codex after the learner understands the Git + ADO branch workflow.</div>
-  `;
+  renderCodexTerminal(section);
 
   renderQuiz();
   prependCodexPromptLibraryToQuizPanel();
@@ -4097,6 +4481,65 @@ function renderCodexWorkspace() {
   if (directoryPanel) {
     directoryPanel.innerHTML = "";
   }
+}
+
+function renderCodexTerminal(section) {
+  ensureCodexCliState();
+  const form = document.getElementById("commandForm");
+  const output = document.getElementById("terminalOutput");
+  const history = document.getElementById("terminalHistory");
+  const input = document.getElementById("commandInput");
+  if (form) {
+    form.hidden = false;
+  }
+
+  document.querySelector(".terminal-panel .section-kicker").textContent = "Codex setup";
+  document.querySelector(".terminal-panel h2").textContent = "Mock Codex CLI";
+  document.querySelector(".terminal-note").innerHTML = `
+    <a href="${escapeAttribute(codexLab.setupUrl)}" target="_blank" rel="noreferrer">Official setup page</a>
+    <span class="codex-cli-state">${renderCodexCliStateText()}</span>
+  `;
+  document.getElementById("promptLabel").textContent = getCodexPrompt();
+  if (input) {
+    input.placeholder = codexCliPlaceholder(section);
+  }
+  history.innerHTML = state.terminal
+    .map((line) => `<div class="terminal-line ${line.type}">${escapeHtml(line.text)}</div>`)
+    .join("");
+  output.scrollTop = output.scrollHeight;
+}
+
+function renderCodexCliStateText() {
+  ensureCodexCliState();
+  const parts = [
+    state.codexCli.installed ? "installed" : "not installed",
+    state.codexCli.loggedIn ? "logged in" : "not logged in",
+    isCodexRepoRoot() ? "repo root" : "outside repo"
+  ];
+  if (state.codexCli.sessionOpen) {
+    parts.push("session open");
+  }
+  return parts.join(" | ");
+}
+
+function codexCliPlaceholder(section) {
+  ensureCodexCliState();
+  if (!state.codexCli.installed) {
+    return codexLab.cliCommand;
+  }
+  if (!state.codexCli.loggedIn) {
+    return "codex login";
+  }
+  if (!isCodexRepoRoot()) {
+    return `cd ${ORACLE_REPO_ROOT}`;
+  }
+  if (!state.codexCli.sessionOpen && section?.prompt) {
+    return "codex";
+  }
+  if (state.codexCli.sessionOpen) {
+    return "Paste a prompt, or type exit";
+  }
+  return "codex";
 }
 
 function renderCapstoneWorkspace() {
@@ -4432,7 +4875,7 @@ function renderCodexInstallSection(install) {
                   <span>${index + 1}</span>
                   <div>
                     <h4>${escapeHtml(step.label)}</h4>
-                    <code>${escapeHtml(step.command)}</code>
+                    ${renderCliFillButton(step.command, "Type command")}
                     <p>${escapeHtml(step.detail)}</p>
                   </div>
                 </article>
@@ -4442,7 +4885,7 @@ function renderCodexInstallSection(install) {
         </div>
         <div class="codex-cli-note">
           <strong>Update command</strong>
-          <code>${escapeHtml(install.updateCommand)}</code>
+          ${renderCliFillButton(install.updateCommand, "Type update command")}
         </div>
         <ul class="codex-note-list">
           ${install.notes.map((note) => `<li>${escapeHtml(note)}</li>`).join("")}
@@ -4494,7 +4937,7 @@ function renderCodexOrientationSection(orientation) {
             ${orientation.questions.map((question) => `<li>${escapeHtml(question)}</li>`).join("")}
           </ul>
         </div>
-        ${renderCopyablePrompt(orientation.prompt)}
+        ${renderCopyablePrompt(orientation.prompt, true)}
         ${renderCodexReadyChecklist(orientation)}
       </section>
     </div>
@@ -4542,8 +4985,8 @@ function renderCodexWorkflowSection(section) {
                   <span>${index + 1}</span>
                   <div>
                     <h4>${escapeHtml(card.label)}</h4>
-                    ${card.command ? `<code>${escapeHtml(card.command)}</code>` : ""}
-                    ${card.prompt ? renderCopyablePrompt(card.prompt) : ""}
+                    ${card.command ? renderCliFillButton(card.command, "Type command") : ""}
+                    ${card.prompt ? renderCopyablePrompt(card.prompt, isCodexMode()) : ""}
                     ${card.detail ? `<p>${escapeHtml(card.detail)}</p>` : ""}
                   </div>
                 </article>
@@ -4627,6 +5070,7 @@ function renderPromptLibraryItem(item) {
       <div>
         <strong>${escapeHtml(item.label)}</strong>
         ${renderCopyButton(item.text, "Copy prompt")}
+        ${renderCliFillButton(singleLinePrompt(item.text), "Type prompt")}
       </div>
       <pre><code>${escapeHtml(item.text)}</code></pre>
     </article>
@@ -4664,10 +5108,11 @@ function capstoneDeliverableMeaning(name) {
   return "Final file review, missing validation, risky assumptions, and cleanup before commit.";
 }
 
-function renderCopyablePrompt(text) {
+function renderCopyablePrompt(text, includeCliButton = false) {
   return `
     <div class="copyable-prompt">
       ${renderCopyButton(text)}
+      ${includeCliButton ? renderCliFillButton(singleLinePrompt(text), "Type prompt") : ""}
       <pre class="codex-prompt-example"><code>${escapeHtml(text)}</code></pre>
     </div>
   `;
@@ -4675,6 +5120,19 @@ function renderCopyablePrompt(text) {
 
 function renderCopyButton(text, label = "Copy") {
   return `<button class="copy-prompt-button" type="button" data-copy-text="${escapeAttribute(text)}">${escapeHtml(label)}</button>`;
+}
+
+function renderCliFillButton(command, label = "Type in CLI") {
+  return `
+    <button class="cli-fill-button" type="button" data-command-fill="${escapeAttribute(command)}"${titleAttribute(`Type into the mock CLI:\n${command}`)}>
+      <code>${escapeHtml(command)}</code>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function singleLinePrompt(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
 }
 
 async function copyTextToClipboard(button) {
@@ -5575,8 +6033,10 @@ function renderQuiz() {
           <h3>${escapeHtml(quiz.question)}</h3>
           ${renderQuizAnswerControl(quiz, session, attempt, selected, isExiting)}
           ${
-            isMissed || isExiting
+            isExiting
               ? `<p class="quiz-feedback">${escapeHtml(quiz.feedback)}</p>`
+              : isMissed
+                ? renderQuizRecoveryPanel(quiz, round, attempt)
               : ""
           }
         </article>
@@ -5608,13 +6068,22 @@ function renderQuizEmptyState(round, correctCount, missedCount) {
 function renderQuizAnswerControl(quiz, session, attempt, selected, isExiting) {
   if (quiz.type !== "choice") {
     const typedValue = attempt.typed || "";
+    const round = clampQuizRound(session.round);
+    const showGhostAnswer = Boolean(
+      (attempt.showHint || shouldRevealQuizAnswer(attempt)) &&
+        round === 2 &&
+        quiz.type === "fill" &&
+        quiz.answerLabel
+    );
+    const placeholder = showGhostAnswer ? quiz.answerLabel : quiz.placeholder || "Type your answer";
     return `
       <form class="quiz-text-form" data-quiz-form="${escapeAttribute(quiz.id)}">
         <input
+          class="${showGhostAnswer ? "quiz-ghost-answer" : ""}"
           type="text"
           name="quiz-answer"
           value="${escapeAttribute(typedValue)}"
-          placeholder="${escapeAttribute(quiz.placeholder || "Type your answer")}"
+          placeholder="${escapeAttribute(placeholder)}"
           autocomplete="off"
           ${isExiting ? "disabled" : ""}
         />
@@ -5631,7 +6100,13 @@ function renderQuizAnswerControl(quiz, session, attempt, selected, isExiting) {
           const option = quiz.options[optionIndex];
           const answered = selected !== undefined;
           const isSelected = selected === optionIndex;
-          const className = answered && isSelected ? (optionIndex === quiz.answerIndex ? "correct" : "wrong") : "";
+          const isRevealed = shouldRevealQuizAnswer(attempt) && optionIndex === quiz.answerIndex;
+          const className = [
+            answered && isSelected ? (optionIndex === quiz.answerIndex ? "correct" : "wrong") : "",
+            isRevealed ? "revealed" : ""
+          ]
+            .filter(Boolean)
+            .join(" ");
           return `
             <button class="quiz-option ${className}" type="button" data-quiz="${escapeAttribute(quiz.id)}" data-option="${optionIndex}" ${isExiting ? "disabled" : ""}>
               ${escapeHtml(option)}
@@ -5641,6 +6116,96 @@ function renderQuizAnswerControl(quiz, session, attempt, selected, isExiting) {
         .join("")}
     </div>
   `;
+}
+
+function renderQuizRecoveryPanel(quiz, round, attempt) {
+  if (attempt.status !== "missed") {
+    return "";
+  }
+
+  const revealAnswer = shouldRevealQuizAnswer(attempt);
+  const wrongCount = getQuizWrongCount(attempt);
+  const answerLabel = getQuizAnswerLabel(quiz);
+
+  if (!attempt.showHint && !revealAnswer) {
+    return `
+      <button class="quiz-hint-button" type="button" data-action="show-quiz-hint" data-quiz-id="${escapeAttribute(quiz.id)}">
+        Show hint
+      </button>
+    `;
+  }
+
+  const isRoundTwoFill = round === 2 && quiz.type === "fill";
+  const hintText = isRoundTwoFill
+    ? "Retype the grey command shown in the answer box."
+    : getQuizHintText(quiz);
+  const hintMarkup = attempt.showHint || revealAnswer
+    ? `
+      <div class="quiz-hint-panel">
+        <strong>${revealAnswer ? `Hint after ${wrongCount} misses` : "Hint"}</strong>
+        <span>${escapeHtml(hintText)}</span>
+        ${isRoundTwoFill && answerLabel ? `<code>${escapeHtml(answerLabel)}</code>` : ""}
+      </div>
+    `
+    : "";
+
+  return `
+    ${hintMarkup}
+    ${revealAnswer ? renderQuizAnswerReveal(quiz, answerLabel) : ""}
+  `;
+}
+
+function getQuizHintText(quiz) {
+  if (quiz.hint) {
+    return quiz.hint;
+  }
+
+  if (quiz.type === "choice" && quiz.feedback) {
+    return quiz.feedback;
+  }
+
+  const label = getQuizAnswerLabel(quiz);
+  if (!label) {
+    return "Review the question wording, then try the safest Git or PowerShell inspection command first.";
+  }
+
+  const normalized = String(label).trim();
+  const firstWord = normalized.split(/\s+/)[0] || "";
+  if (firstWord) {
+    return `Start with ${firstWord}; use the full command or prompt that fits the scenario.`;
+  }
+
+  return "Use the command or prompt that directly answers the scenario.";
+}
+
+function renderQuizAnswerReveal(quiz, answerLabel) {
+  if (!answerLabel) {
+    return "";
+  }
+
+  const label = quiz.type === "choice" ? "Correct answer" : "Answer";
+  return `
+    <div class="quiz-answer-panel">
+      <strong>${escapeHtml(label)}</strong>
+      <code>${escapeHtml(answerLabel)}</code>
+    </div>
+  `;
+}
+
+function getQuizAnswerLabel(quiz) {
+  if (quiz.type === "choice") {
+    return quiz.options?.[quiz.answerIndex] || "";
+  }
+  return quiz.answerLabel || quiz.acceptedAnswers?.[0] || "";
+}
+
+function getQuizWrongCount(attempt) {
+  const count = Number(attempt?.wrongCount);
+  return Number.isFinite(count) ? Math.max(0, count) : attempt?.status === "missed" ? 1 : 0;
+}
+
+function shouldRevealQuizAnswer(attempt) {
+  return Boolean(attempt?.revealAnswer || getQuizWrongCount(attempt) >= 2);
 }
 
 function getQuizBank(moduleId = state?.activeModuleId || "git-basics", round = state?.quizSession?.round || 1) {
@@ -5697,6 +6262,7 @@ function normalizeQuizItems(roundItems, quizRound) {
           question: quiz.question,
           options: quiz.options,
           answerIndex,
+          hint: quiz.hint || "",
           feedback: quiz.feedback || "Correct. Keep going."
         };
       }
@@ -5708,6 +6274,7 @@ function normalizeQuizItems(roundItems, quizRound) {
         acceptedAnswers: quiz.acceptedAnswers || [quiz.answer].filter(Boolean),
         answerLabel: quiz.answerLabel || quiz.answer || quiz.acceptedAnswers?.[0] || "",
         placeholder: quiz.placeholder || "Type your answer",
+        hint: quiz.hint || "",
         feedback: quiz.feedback || "Correct. Keep going."
       };
     })
@@ -5795,9 +6362,13 @@ function handleQuizAnswer(quizId, optionIndex) {
   }
 
   const isCorrect = optionIndex === quiz.answerIndex;
+  const wrongCount = isCorrect ? 0 : getQuizWrongCount(existingAttempt) + 1;
   session.attempts[quizId] = {
     selected: optionIndex,
-    status: isCorrect ? "exiting" : "missed"
+    status: isCorrect ? "exiting" : "missed",
+    wrongCount,
+    showHint: !isCorrect && (Boolean(existingAttempt.showHint) || wrongCount >= 2),
+    revealAnswer: !isCorrect && wrongCount >= 2
   };
 
   if (isCorrect) {
@@ -5816,6 +6387,26 @@ function handleQuizAnswer(quizId, optionIndex) {
   scheduleQuizCompletion(quizId);
 }
 
+function showQuizHint(quizId) {
+  const quiz = getQuizBank().find((item) => item.id === quizId);
+  const session = ensureQuizSession();
+  if (!quiz) {
+    return;
+  }
+
+  const attempt = session.attempts[quizId] || {};
+  if (attempt.status !== "missed") {
+    return;
+  }
+
+  const round = clampQuizRound(session.round);
+  session.attempts[quizId] = {
+    ...attempt,
+    typed: quiz.type !== "choice" && round === 2 && quiz.type === "fill" ? "" : attempt.typed || "",
+    showHint: true
+  };
+}
+
 function handleQuizTextAnswer(quizId, value) {
   const quiz = getQuizBank().find((item) => item.id === quizId);
   const session = ensureQuizSession();
@@ -5830,9 +6421,13 @@ function handleQuizTextAnswer(quizId, value) {
   }
 
   const isCorrect = isQuizTextCorrect(quiz, typed);
+  const wrongCount = isCorrect ? 0 : getQuizWrongCount(existingAttempt) + 1;
   session.attempts[quizId] = {
     typed,
-    status: isCorrect ? "exiting" : "missed"
+    status: isCorrect ? "exiting" : "missed",
+    wrongCount,
+    showHint: !isCorrect && (Boolean(existingAttempt.showHint) || wrongCount >= 2),
+    revealAnswer: !isCorrect && wrongCount >= 2
   };
 
   if (isCorrect) {
@@ -6232,8 +6827,20 @@ function loadState() {
         parsed.inLesson = Boolean(parsed.inLesson);
         parsed.viewMode = ["practice", "codex", "capstone", "vscode"].includes(parsed.viewMode) ? parsed.viewMode : "guided";
         parsed.codexSection = clampIndex(parsed.codexSection, codexLab.sections.length);
+        parsed.codexCli = {
+          ...createCodexCliState(),
+          ...(parsed.codexCli && typeof parsed.codexCli === "object" ? parsed.codexCli : {})
+        };
+        parsed.codexCli.promptRuns = Array.isArray(parsed.codexCli.promptRuns) ? parsed.codexCli.promptRuns : [];
+        if (parsed.viewMode === "codex" && (!parsed.cwd || parsed.cwd === PS_ROOT)) {
+          parsed.cwd = CODEX_DEFAULT_CWD;
+        }
         parsed.vscodeSection = clampIndex(parsed.vscodeSection, vscodeLab.sections.length);
         parsed.repoExplorerOpen = Boolean(parsed.repoExplorerOpen);
+        parsed.repoExplorerTouched = Boolean(parsed.repoExplorerTouched);
+        if (parsed.viewMode === "guided" && !parsed.repoExplorerTouched) {
+          parsed.repoExplorerOpen = true;
+        }
         parsed.explorerCollapsedFolders = Array.isArray(parsed.explorerCollapsedFolders) ? parsed.explorerCollapsedFolders : [];
         parsed.explorerExpandedFolders = Array.isArray(parsed.explorerExpandedFolders) ? parsed.explorerExpandedFolders : [];
         parsed.explorerExpandedFiles = Array.isArray(parsed.explorerExpandedFiles) ? parsed.explorerExpandedFiles : [];
